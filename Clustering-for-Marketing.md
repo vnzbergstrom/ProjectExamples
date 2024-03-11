@@ -3,7 +3,6 @@ Finding Customer Clusters
 Veronica Bergstrom
 Last updated: 11 March, 2024
 
-- [Load Libraries](#load-libraries)
 - [View Data Set](#view-data-set)
   - [Column Names](#column-names)
   - [First Six Observations of the Data
@@ -19,14 +18,14 @@ Last updated: 11 March, 2024
 - [Setup gower object](#setup-gower-object)
 - [Figure out optimal number of
   clusters](#figure-out-optimal-number-of-clusters)
-- [create pam object](#create-pam-object)
-- [visualize clusters](#visualize-clusters)
+- [Create PAM object](#create-pam-object)
+- [Visualize Clusters](#visualize-clusters)
 - [Check Which Cluster Each Observation Was Assigned
   To](#check-which-cluster-each-observation-was-assigned-to)
-- [Medoids table](#medoids-table)
+- [Medoids Table](#medoids-table)
 - [Visualize Factored Variables by
   Cluster](#visualize-factored-variables-by-cluster)
-- [create Visualizations for the Continuous
+- [Create Visualizations for the Continuous
   Variables](#create-visualizations-for-the-continuous-variables)
 
 At Dacture, I automated code to perform cluster analysis, a type of
@@ -35,32 +34,6 @@ This script will go through an example of how to use **partition around
 medoids (PAM) clustering** to create categories of consumers to target
 for marketing purposes. The benefit of PAM clustering over K-means
 clustering is that it is better able to handle categorical data.
-
-## Load Libraries
-
-``` r
-library(corrplot)
-library(gridExtra)
-library(GGally)
-library(knitr)
-library(cluster)
-library(ggpubr)
-library(factoextra)
-library(umx)
-library(fastDummies)
-library(dplyr)
-library(tidyr)
-library(naniar)
-library(DescTools)
-library(caret)
-library(ggplot2)
-library(plotly)
-library(ggforce)
-library(NbClust)
-library(listviewer)
-library(magrittr)
-library(jsonlite)
-```
 
 ## View Data Set
 
@@ -160,24 +133,24 @@ factors.
 - cannot use range if specifying centering, scaling, or box-cox
   transformations
 
-# Setup gower object
+## Setup gower object
 
 Gower’s metric is a distance/dissimilarity measure. It determines which
 observations are most and least similar to one another.
 
-# Figure out optimal number of clusters
+## Figure out optimal number of clusters
 
 I have written code to check for the optimal number of clusters between
 2 and 20.
 
     ## [1] "The optimal number of clusters to use is 3"
 
-# create pam object
+## Create PAM object
 
 Next, I create the PAM object using the optimal number of clusters,
 which is 3.
 
-# visualize clusters
+# Visualize Clusters
 
 Shows a 2-dimensional plot of how the clusters visually cluster
 together. You can see that this clustering has fairly good seperation.
@@ -198,7 +171,7 @@ Customer 3 were assigned to Cluster 1.
     ## 5   5       2
     ## 6   6       3
 
-# Medoids table
+# Medoids Table
 
 The medoids table shows the customer that best represents each cluster.
 For example, you can see that Customer 1902 best represents Cluster 1.
@@ -249,7 +222,7 @@ home and only 12% of these customers have children in their home.
 
 ![](Clustering-for-Marketing_files/figure-gfm/unnamed-chunk-6-1.png)<!-- -->
 
-# create Visualizations for the Continuous Variables
+# Create Visualizations for the Continuous Variables
 
 Outputs an individual plot for each continuous variable and show the
 value of each medoid by each cluster (clusters are on the x-axis). These
