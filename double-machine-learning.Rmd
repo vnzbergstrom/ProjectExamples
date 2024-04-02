@@ -1,0 +1,1009 @@
+---
+title: "Double Machine Learning"
+author: "Veronica Bergstrom"
+date: "Last updated: `r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  github_document:
+    toc: true
+always_allow_html: true
+editor_options: 
+  chunk_output_type: console
+---
+
+Here, I will go through a double machine learning flow that allows us to make causal inferences on observational data. 
+
+```{r load libraries, echo = FALSE}
+library(plyr)
+library(dplyr)
+library(tidyr)
+library(drtmle)
+library(SuperLearner)
+library(tictoc)
+library(magrittr)
+library(lubridate)
+library(jsonlite)
+library(fastDummies)
+library(caret)
+library(stats)
+#library(learnr) # standard package to render this tutorial
+library(tidyverse) # standard package to work with data
+library(glmnet) # for lasso
+library(hdm) # for high-dimensional metrics 
+library(broom) # for tidying up regression outputs
+#library(gamlr)
+library(jsonlite)
+library(emmeans)
+library(plotly)
+library(scales)
+library(rsample)
+library(ROCit)
+```
+
+## View Data Set
+
+The data set is comprised of 15 variables. We are interested in estimating the causal effect of the X variable, intervention, on the Y variable, outcome. The remaining 13 variables labelled V1 to V13 are variables that may be confounders (i.e., influence both X and Y), predictive of only the Y variable, or predictive of only the X variable. For this example we are going to assume that none of the variables are colliders (i.e., are influenced by both X and Y). 
+
+```{r load data, echo = FALSE}
+
+df.original <- read.csv("/Users/verns/Documents/data/doubleML_data.csv", header = TRUE, sep = ",",
+              stringsAsFactors = TRUE, na.strings =  c("NA", "", " ", ".",  "..", "na", "N/A", "NULL"))
+
+```
+
+```{r}
+names(df.original)
+```
+
+```{r}
+str(df.original)
+```
+
+```{r}
+head(df.original)
+```
+
+```{r}
+df.original %>% psych::describe()
+```
+
+
+
+```{r standard inputs, echo = FALSE}
+# standard inputs that can be changed
+digit_precision = 3 # for rounding purposes
+options(digits = 3)
+```
+
+```{r set seed, echo = FALSE}
+seed_number = 1 
+
+if (!is.null(seed_number)) {
+  set.seed(seed_number)
+}
+```
+
+## Inputs
+
+```{r inputs, echo = FALSE}
+target_name = "outcome"
+treatment_name = "intervention"
+
+target_reference = "Non-Travel" # only specify for multiclass cases; otherwise, null
+treatment_reference = "Non-Travel" # only specify for multiclass cases; otherwise, null
+
+# remove irrelevant columns (could have users specify these columns themselves)
+drop_cols <- c("ReasonForChurn") #c("ReasonForChurn","Feature1","Feature4","UptimeOver90Days","SupportContactIn180d") # add list of predictors to drop here
+```
+
+### Specify index (optional)
+
+```{r specify index, echo = FALSE}
+
+# specify index (optional)
+new_index = FALSE # FALSE if no; TRUE if yes
+index_name = c("EmployeeID") # may add variable in list form
+
+if (new_index == TRUE) {
+  df.original %<>% dplyr::relocate(all_of(index_name)) # add column name inside relocate parenthesis
+  df.original <- data.frame(df.original[,-1], row.names = df.original[,1])
+}
+```
+
+```{r drop cols, echo = FALSE}
+df.original[,c(drop_cols)] <- list(NULL) # this line never changes
+```
+
+## Clean target  and treatment variable
+
+```{r clean target and treatment variable, echo = FALSE}
+
+# df %<>% mutate_if(is.integer, as.numeric)
+# 
+# if (numeric_case == FALSE) {
+#   df[[target_name]] %<>% gsub("^%","percent_", .)
+#   df[[target_name]] %<>% gsub("\\%$","_percent", .)
+#   df[[target_name]] %<>% gsub("\\$$","_dollarAmt", .)
+#   df[[target_name]] %<>% gsub("^$","dollarAmt_", .)
+#   df[[target_name]] %<>% gsub("^>","greaterThan_", .)
+#   df[[target_name]] %<>% gsub("^<","lesserThan_", .)
+#   df[[target_name]] %<>% gsub("^@","at_", .)
+#   df[[target_name]] %<>% gsub("@","_at_", .)
+#   df[[target_name]] %<>% gsub("^/","X", .)
+#   df[[target_name]] %<>% gsub("\\/$",".", .)
+#   df[[target_name]] %<>% gsub("/",".", .)
+#   #df[[target_name]] %<>% gsub("-",".", .)
+#   df[[target_name]] %<>% gsub("__","_", .)
+# }
+# 
+
+
+# clean treatment 
+if (!is.numeric(df.original[[treatment_name]])) {
+  df.original[[treatment_name]] %<>% gsub(" ","_", .)
+  
+  df.original %<>% mutate_if(is.character, as.factor) # turns character type columns to factor type
+}
+
+treatment_level_options = levels(df.original[[treatment_name]]) |> toJSON()
+
+# clean target
+if (!is.numeric(df.original[[target_name]])) {
+  df.original[[target_name]] %<>% gsub(" ","_", .)
+  
+  df.original %<>% mutate_if(is.character, as.factor) # turns character type columns to factor type
+}
+
+target_level_options = levels(df.original[[target_name]]) |> toJSON()
+
+
+```
+
+
+## Check Class of Target Variable
+```{r check target class, echo = FALSE}
+if (length(unique(na.omit(df.original[[target_name]]))) == 2) { 
+  binary_case = TRUE
+  numeric_case = FALSE
+  multiclass_case = FALSE
+} else if (is.factor(df.original[[target_name]]) & length(unique(df.original[[target_name]])) >= 3) {
+  binary_case = FALSE
+  numeric_case = FALSE
+  multiclass_case = TRUE
+} else if ( (is.numeric(df.original[[target_name]]) & length(unique(na.omit(df.original[[target_name]]))) > 2) | (is.numeric(df.original[[target_name]]) & length(unique(na.omit(df.original[[target_name]]))) == 1) ) {
+  binary_case = FALSE
+  numeric_case = TRUE
+  multiclass_case = FALSE
+}
+
+
+```
+
+## Check Class of Treatment Variable
+```{r check treatment class, echo = FALSE}
+if (length(unique(na.omit(df.original[[treatment_name]]))) == 2) { 
+  binary_trt_case = TRUE
+  numeric_trt_case = FALSE
+  multiclass_trt_case = FALSE
+} else if (is.factor(df.original[[treatment_name]]) & length(unique(df.original[[treatment_name]])) >= 3) {
+  binary_trt_case = FALSE
+  numeric_trt_case = FALSE
+  multiclass_trt_case = TRUE
+} else if ( (is.numeric(df.original[[treatment_name]]) & length(unique(na.omit(df.original[[treatment_name]]))) > 2) | (is.numeric(df.original[[treatment_name]]) & length(unique(na.omit(df.original[[treatment_name]]))) == 1) ) {
+  binary_trt_case = FALSE
+  numeric_trt_case = TRUE
+  multiclass_trt_case = FALSE
+}
+
+```
+
+## Check number of observations per level for factors in df
+
+To check this is working, work_type for the stroke data set has only 22 observations for Never_worked
+
+```{r check sums_count, echo = FALSE}
+
+sums_count = vector("list",0) # create empty list to populate percentage of rows that will be retained after removing all levels with less than 24 observations
+sums_name = vector("list",0) # create empty list to populate the names of the factors that are being assessed
+
+for (i in 1:ncol(df.original)) { # for every column in the data frame
+
+  if (!is.numeric(df.original[[i]])) { # if column is not numeric (i.e., character/factor)
+
+  table <- as.data.frame(table(df.original[[i]])) # create a table with frequency counts for levels within the factor
+
+  table %<>% filter(Freq >= 24) # only retain levels that had at least 24 observations
+
+  sum_obs <- sum(table$Freq) # count how many observations are retained in the data set
+
+  sum_obs <- (1 - sum_obs/NROW(df.original))*100 # find the percentage of the data set that would be deleted if the column were retained
+
+  sums_count_append <- round(sum_obs, digits = digit_precision) # create a list of the percentage of observations that would be deleted if the column was left in for training
+
+  sums_count[[length(sums_count) + 1 ]] <- sums_count_append
+
+  sums_name_append <- colnames(df.original[i]) # create a list of the names of the factors in the data set
+
+  sums_name[[length(sums_name) + 1 ]] <- sums_name_append
+
+  }
+}
+
+names(sums_count) <- sums_name # assign the list of factor names to the list of proportions
+
+print(sums_count)
+
+```
+
+## Remove levels with less than 24 observations
+
+```{r remove levels with less than 24 observations, echo = FALSE}
+
+levels_drop_list = vector("list",0) # create an empty list for metric to populate
+
+for (i in 1:ncol(df.original)) { # for every column in the data frame
+
+  if (!is.numeric(df.original[[i]])) { # if column is not numeric (i.e., character/factor)
+
+    levels = df.original[[i]] %>% # retrieve list of levels
+      as.factor() %>%
+      levels()
+
+    for (j in 1:length(levels)) { # for each level
+
+      rows = which(df.original[[i]] == levels[j]) # find number of rows
+
+      if (length(rows) < 24 & length(rows) > 0 ) { # check if there are less than 24 rows corresponding to the level
+
+        levels_drop_list_append <- paste0(levels[j], " within the predictor ", colnames(df.original[i])) # create a list that identifies which levels within which predictors were dropped
+        levels_drop_list[[length(levels_drop_list) + 1 ]] <- levels_drop_list_append
+
+        df.original = df.original[-rows, ] # delete rows
+
+        df.original[[i]] <- droplevels(df.original[[i]]) # drop unused levels
+
+      }
+
+    }
+
+  }
+
+}
+
+obs_24_error <- '' #initialize unused object
+if (NROW(df.original) == 0) {
+  obs_24_error = paste0("Removing levels (e.g., 90209; 90210) from categorical columns (e.g., Zip_Code) that had less than 24 observations resulted in a deletion of all observations in the data set. Please review which columns resulted in a high number of observations being deleted and go back and drop these columns before training your model.")
+  print(obs_24_error)
+}
+
+levels_drop_list %<>% toJSON()
+obs_24_error %<>% toJSON()
+```
+
+## Move me function
+
+From https://github.com/mrdwab/SOfun/blob/master/R/moveMe.R 
+
+```{r, echo = FALSE}
+moveMe <- function(invec, movecommand) {
+  movecommand <- lapply(strsplit(strsplit(movecommand, ";")[[1]], ",|\\s+"), 
+                        function(x) x[x != ""])
+  movelist <- lapply(movecommand, function(x) {
+    Where <- x[which(x %in% c("before", "after", "first", "last")):length(x)]
+    ToMove <- setdiff(x, Where)
+    list(ToMove, Where)
+  })
+  myVec <- invec
+  for (i in seq_along(movelist)) {
+    temp <- setdiff(myVec, movelist[[i]][[1]])
+    A <- movelist[[i]][[2]][1]
+    if (A %in% c("before", "after")) {
+      ba <- movelist[[i]][[2]][2]
+      if (A == "before") {
+        after <- match(ba, temp)-1
+      } else if (A == "after") {
+        after <- match(ba, temp)
+      }    
+    } else if (A == "first") {
+      after <- 0
+    } else if (A == "last") {
+      after <- length(myVec)
+    }
+    myVec <- append(temp, values = movelist[[i]][[1]], after = after)
+  }
+  myVec
+}
+```
+
+```{r clean target, echo = FALSE}
+covariate_names = df.original |> dplyr::select(-target_name,-treatment_name) |> names()
+
+df <- df.original |> dplyr::select(target_name, treatment_name, covariate_names)
+
+# make target variable first column
+## doing this so the target variable can always be selected with df[,1] 
+df %<>% relocate(all_of((target_name)))
+
+# remove spaces from all levels in df
+for ( i in 1:length(colnames(df)) ) {
+  if (is.factor(df[,i]) == TRUE) {
+    df[,i] <- gsub(" ", "_", df[,i])
+    df[,i] <- gsub("\\--*","_",df[,i])
+    df[,i] <- gsub("&", "_and_", df[,i])
+    df[,i] <- as.factor(df[,i])
+  }
+}
+
+#  remove observations with a missing value for the target variable
+#df <- df[!is.na(target),]
+df %<>% drop_na(target_name)
+
+#  remove observations with a missing value for the treatment variable
+df %<>% drop_na(treatment_name)
+
+# make sure all columns have appropriate names
+colnames(df) <- make.names(colnames(df))
+
+# convert any boolean columns to factors
+for (i in 1:length(colnames(df))) {
+  if ( class(df[[i]]) == "logical") {
+    df[[i]] <- as.factor(df[[i]])
+  }
+}
+
+```
+
+```{r, echo = FALSE}
+target = df[[target_name]]
+treatment = df[[treatment_name]]
+covariates = df |> dplyr::select(covariate_names)
+```
+
+
+## Specify reference level if Target Variable or Treatment Variable is multiclass
+
+```{r reference level, echo = FALSE}
+
+# clean treatment reference
+if (multiclass_trt_case == TRUE) {
+  treatment_reference %<>% gsub(" ","_", .)
+  treatment_reference %<>% gsub("\\--*","_", .)
+  treatment_reference %<>% gsub("&", "_and_", .)
+}
+
+# clean target reference
+if (multiclass_case == TRUE) {
+  target_reference %<>% gsub(" ","_", .)
+  target_reference %<>% gsub("\\--*","_", .)
+  target_reference %<>% gsub("&", "_and_", .)
+}
+
+
+target_levels = NULL
+target_names = vector("list",0)
+# Check levels (if appropriate)
+if (numeric_case == FALSE & is.factor(df[[target_name]])) {
+  target_levels = levels(df[[target_name]])
+  for (i in target_levels) {
+    new_element <- print(paste0(target_name,"_",i))
+    target_names[[length(target_names) + 1 ]] <- new_element
+  }
+  target_names <- unlist(target_names)
+}
+
+treatment_levels = NULL
+treatment_names = vector("list",0)
+# Check levels (if appropriate)
+if (numeric_trt_case == FALSE & is.factor(df[[treatment_name]])) {
+  treatment_levels = levels(df[[treatment_name]])
+  for (i in treatment_levels) {
+    new_element <- print(paste0(treatment_name,"_",i))
+    treatment_names[[length(treatment_names) + 1 ]] <- new_element
+  }
+  treatment_names <- unlist(treatment_names)
+}
+
+# move reference to be first in level order
+if (multiclass_case == TRUE) {
+  df[[target_name]] %<>% relevel(ref = target_reference)
+  contrasts(df[[target_name]]) = contr.treatment(length(target_names))
+  target_levels <- moveMe(target_levels, paste0(target_reference, " first"))
+  target_reference_name <- paste0(target_name, "_", target_reference)
+  #target_names <- moveMe(target_names, paste0(target_reference, " first"))
+}
+
+if (multiclass_trt_case == TRUE) {
+  df[[treatment_name]] %<>% relevel(ref = treatment_reference)
+  contrasts(df[[treatment_name]]) = contr.treatment(length(treatment_names))
+  treatment_levels <- moveMe(treatment_levels, paste0(treatment_reference, " first"))
+  treatment_reference_name <- paste0(treatment_name, "_", treatment_reference)
+  #treatment_names <- moveMe(treatment_names, paste0(treatment_reference, " first"))
+}
+```
+
+
+## Convert date columns to factors
+
+```{r convert date, echo = FALSE}
+for (i in 1:length(colnames(df))) {
+  if (is.Date(df[[i]])) {
+    df[[i]] <- as.factor(df[[i]])
+  }
+}
+```
+
+## Convert numeric variables to factors, as specified by user upload; convert any binary numeric variables to factor; convert effect-coded variable to be dummy-coded
+
+```{r convert to factor, echo = FALSE}
+
+convertToFactor = NULL # set to NULL if it is empty
+
+df_orig_effect <- df |> select_if(~ all(. %in% c(-1,1,NA)))
+df_orig_dummy <- df |> select_if(~ all(. %in% c(0,1,NA)))
+df_orig_no_dummy <- df |> select_if(purrr::negate(~ all(. %in% c(0,1,NA)))) |> select_if(purrr::negate(~ all(. %in% c(-1,1,NA))))
+
+# drop any zero-variance variables from df_orig_effect
+for (col in 1:length(colnames(df_orig_effect))) {
+  if (length(df_orig_effect) > 0) {
+    if (length(unique(na.omit(df_orig_effect[, col]))) == 1) {
+      df_orig_effect[,col] <- NULL
+    }
+  }
+}
+    
+# convert effect coding to dummy coding
+for (col in 1:length(colnames(df_orig_effect))) {
+  if (length(df_orig_effect) > 0) {
+    if (length(unique(na.omit(df_orig_effect[, col]))) == 2 & is.numeric(df_orig_effect[, col])) {
+      df_orig_effect[,col] <- ifelse(df_orig_effect[,col] == -1, 0, ifelse(df_orig_effect[,col] == 1, 1, df_orig_effect[,col]))
+    }
+  }
+}
+
+# combine effect coded df with dummy coded df, depending on which exists
+if (length(df_orig_dummy) > 0 & length(df_orig_effect) > 0) {
+  df_orig_dummy <- cbind(df_orig_dummy, df_orig_effect)
+} else if (length(df_orig_dummy) > 0 & length(df_orig_effect) == 0) {
+  df_orig_dummy <- df_orig_dummy
+} else if (length(df_orig_dummy) == 0 & length(df_orig_effect) > 0) {
+  df_orig_dummy <- df_orig_effect
+}
+
+# turn all non-dummy-coded binary variables to factors
+for (col in 1:length(colnames(df_orig_no_dummy))) {
+  if (length(df_orig_no_dummy) > 0) {
+    if (length(unique(na.omit(df_orig_no_dummy[, col]))) == 2 & is.numeric(df_orig_no_dummy[, col])) {
+      df_orig_no_dummy[[col]] = as.factor(df_orig_no_dummy[[col]])
+    }
+  }
+}
+
+# turn any numeric variables to categorical as specified by front-end df upload
+for (i in (convertToFactor)) {
+  if (length(df_orig_no_dummy) > 0) {
+    if (i %in% df_orig_no_dummy[[i]]) {
+      df_orig_no_dummy[[i]] = as.factor(df_orig_no_dummy[[i]])
+    }
+  }
+}
+
+# combine changes into a single df
+if (length(df_orig_dummy) > 0 & length(df_orig_no_dummy) > 0) {
+  df <- cbind(df_orig_dummy,df_orig_no_dummy)
+} else if (length(df_orig_dummy) > 0 & length(df_orig_no_dummy) == 0) {
+  df <- df_orig_dummy
+} else if (length(df_orig_dummy) == 0 & length(df_orig_no_dummy) > 0) {
+  df <- df_orig_no_dummy
+}
+```
+
+
+```{r fill in missing observations, echo = FALSE}
+
+for (col in names(df)) {
+  if (is.factor(df[[col]])) {
+    if (sum(is.na(df[[col]])) >= 1) {
+      levels(df[[col]]) <- c(levels(df[[col]]), "missing")
+      df[[col]][is.na(df[[col]])] <- "missing"
+    }
+  }
+}
+```
+
+## Test/train split
+
+```{r, echo = FALSE}
+# shuffle dataset in case it's not randomized already
+df <- df[sample(1:nrow(df)), ]
+
+# create training (70%) and test (30%) sets for the stroke data
+if (nrow(df) <= 100000) {
+  train_proportion = .70 # can default to .70; but give users the option to edit
+} else if (nrow(df) <= 1000000) {
+  train_proportion = .90
+} else {
+  train_proportion = .99
+}
+
+df_split <- initial_split(df, prop = train_proportion)
+df_train <- training(df_split)
+df_test <- testing(df_split)
+```
+
+## Pre-process
+
+```{r pre-process, echo = FALSE}
+varnames <- c(target_name, treatment_name)
+
+# index the vector of column names that you specified above to not pre-process
+no_pp <- names(df_train) %in% varnames
+
+to_pp_df <- df_train |> dplyr::select(-target_name,-treatment_name)
+
+if (length(select_if(to_pp_df, is.numeric)) > 1) {
+
+  # preprocess
+  tic("pp")
+  
+  pp <- preProcess(df_train[, !no_pp], method = c("knnImpute"), k = 10)
+  pp_df <- stats::predict(pp,df_train)
+  pp_test <- stats::predict(pp,df_test)
+  
+  
+  time_pp <- toc()
+  time_pp <- time_pp$callback_msg |> toJSON()
+  
+} else {
+  tic("pp")
+  
+  pp <- preProcess(df_train[, !no_pp], method = c("center","scale"))
+  pp_df <- stats::predict(pp,df_train)
+  pp_test <- stats::predict(pp.df_test)
+  
+  time_pp <- toc()
+  time_pp <- time_pp$callback_msg |> toJSON()
+}
+```
+
+
+```{r make names, echo = FALSE}
+# make sure all columns have appropriate names
+colnames(pp_df) <- make.names(colnames(pp_df))
+colnames(pp_test) <- make.names(colnames(pp_test))
+```
+
+
+## Split multiclass variables
+
+```{r split multiclass variables, echo = FALSE}
+
+df_list = vector("list",0)
+treatment_comparison_levels = vector("list",0)
+target_comparison_levels = vector("list",0)
+
+if (multiclass_case == FALSE & multiclass_trt_case == TRUE) {
+  for (i in treatment_levels[-1]) {
+    new_df <- pp_df |> dplyr::filter(get(treatment_name) == treatment_reference | get(treatment_name) == i)
+    new_df %<>% droplevels()
+    new_df[[treatment_name]] %<>% relevel(treatment_reference)
+    new_name <- paste0("subset_",i) # create name 
+    assign(new_name,new_df) # assign the new name
+    df_list[[length(df_list) + 1 ]] <- new_name
+  }
+}
+
+if (multiclass_case == TRUE & multiclass_trt_case == FALSE) {
+  for (i in target_levels[-1]) {
+    new_df <- pp_df |> dplyr::filter(get(target_name) == target_reference | get(target_name) == i)
+    new_df %<>% droplevels()
+    new_df[[target_name]] %<>% relevel(target_reference)
+    new_name <- paste0("DV_",i) # create name 
+    assign(new_name,new_df) # assign the new name
+    df_list[[length(df_list) + 1 ]] <- new_name
+  }
+}
+
+
+if (multiclass_case == TRUE & multiclass_trt_case == TRUE) {
+   for (i in target_levels[-1]) {
+    new_df <- pp_df |> dplyr::filter(get(target_name) == target_reference | get(target_name) == i)
+    new_df %<>% droplevels()
+    new_df[[target_name]] %<>% relevel(target_reference)
+      for (j in treatment_levels[-1]) {
+        new2_df <- new_df |> dplyr::filter(get(treatment_name) == treatment_reference | get(treatment_name) == j)
+        new2_df %<>% droplevels()
+        new2_df[[treatment_name]] %<>% relevel(treatment_reference)
+        new_name <- paste0("DV_",i, "_IV_", j) # create name 
+        new_target_level <- paste0(i)
+        new_treatment_level <- paste0(j)
+        assign(new_name,new2_df) # assign the new name
+        df_list[[length(df_list) + 1 ]] <- new_name
+        target_comparison_levels[[length(target_comparison_levels) + 1 ]] <- new_target_level
+        treatment_comparison_levels[[length(treatment_comparison_levels) + 1 ]] <- new_treatment_level
+    }
+  }
+}
+
+unlist(df_list)
+```
+
+## Dummy code binary and numeric cases
+
+```{r dummy coding, echo = FALSE}
+
+# for training set
+
+df.numeric <- select_if(pp_df, is.numeric)
+df.binary <- select_if(pp_df, is.factor)
+df.multi <- select_if(pp_df, is.factor)
+
+for (i in colnames(df.binary)) {
+  if (length(unique(df.binary[[i]])) > 2) {
+    df.binary[[i]] <- NULL
+  }
+}
+
+for (i in colnames(df.multi)) {
+  if (length(unique(df.multi[[i]])) == 2) {
+    df.multi[[i]] <- NULL
+  }
+}
+
+## dummy code categorical variables & remove original variables
+
+if (length(df.binary) != 0) {
+  df.binary %<>% dummy_cols(remove_first_dummy = TRUE) # create dummy coded columns and remove first dummy for these binary cases
+} 
+
+if (length(df.binary) == 2) {
+  df.binary[[1]] <- NULL
+} else if (length(df.binary) > 2) {
+  df.binary = df.binary[, sapply(df.binary, class) != "factor"] # remove original columns
+}
+
+if (length(df.multi) != 0) {
+  df.multi %<>% dummy_cols() # create dummy coded columns
+  df.multi = df.multi[, sapply(df.multi, class) != "factor"] # remove original columns and keep all dummies for these multiclass cases
+}
+
+pp_df <- cbind(df.numeric,df.binary)
+pp_df <- cbind(pp_df,df.multi)
+
+# for test set
+
+df.numeric <- select_if(pp_test, is.numeric)
+df.binary <- select_if(pp_test, is.factor)
+df.multi <- select_if(pp_test, is.factor)
+
+for (i in colnames(df.binary)) {
+  if (length(unique(df.binary[[i]])) > 2) {
+    df.binary[[i]] <- NULL
+  }
+}
+
+for (i in colnames(df.multi)) {
+  if (length(unique(df.multi[[i]])) == 2) {
+    df.multi[[i]] <- NULL
+  }
+}
+
+## dummy code categorical variables & remove original variables
+
+if (length(df.binary) != 0) {
+  df.binary %<>% dummy_cols(remove_first_dummy = TRUE) # create dummy coded columns and remove first dummy for these binary cases
+} 
+
+if (length(df.binary) == 2) {
+  df.binary[[1]] <- NULL
+} else if (length(df.binary) > 2) {
+  df.binary = df.binary[, sapply(df.binary, class) != "factor"] # remove original columns
+}
+
+if (length(df.multi) != 0) {
+  df.multi %<>% dummy_cols() # create dummy coded columns
+  df.multi = df.multi[, sapply(df.multi, class) != "factor"] # remove original columns and keep all dummies for these multiclass cases
+}
+
+pp_test <- cbind(df.numeric,df.binary)
+pp_test <- cbind(pp_test,df.multi)
+
+```
+
+## Dummy code multiclass cases
+
+```{r dummy coding multiclass treatment cases, echo = FALSE}
+
+if (multiclass_case == FALSE & multiclass_trt_case == TRUE) {
+
+  for (i in treatment_levels[-1]) {
+    df.numeric <- select_if(get(paste0("subset_",i)), is.numeric)
+    df.binary <- select_if(get(paste0("subset_",i)), is.factor)
+    df.multi <- select_if(get(paste0("subset_",i)), is.factor)
+    
+    for (j in colnames(df.binary)) {
+    if (length(unique(df.binary[[j]])) > 2) {
+      df.binary[[j]] <- NULL
+    }
+  }
+  
+    for (j in colnames(df.multi)) {
+      if (length(unique(df.multi[[j]])) == 2) {
+        df.multi[[j]] <- NULL
+      }
+    }
+    
+    # dummy code categorical variables & remove original variables
+    
+    if (length(df.binary) != 0) {
+      df.binary %<>% dummy_cols(remove_first_dummy = T) 
+    } 
+    
+    if (length(df.binary) == 2) {
+      df.binary[[1]] <- NULL
+    } else if (length(df.binary) > 2) {
+      df.binary = df.binary[, sapply(df.binary, class) != "factor"] # remove original columns
+    }
+    
+    if (length(df.multi) != 0) {
+      df.multi %<>% dummy_cols() # create dummy coded columns
+      df.multi = df.multi[, sapply(df.multi, class) != "factor"] # remove original columns and keep all dummies for these multiclass cases
+    }
+    
+    new_df <- cbind(df.numeric,df.binary)
+    new_df <- cbind(new_df,df.multi)
+    
+    #new_df[[treatment_reference_name]] <- NULL
+    
+    # if (binary_case == TRUE) {
+    #   new_df <- new_df |> dplyr::select(-target_names[1])
+    # }
+    
+    new_name <- paste0("subset_",i) # create name 
+    assign(new_name,new_df) # assign the new name
+    
+  }
+  
+}
+```
+
+```{r dummy coding multiclass target cases, echo = FALSE}
+if (multiclass_case == TRUE & multiclass_trt_case == FALSE) {
+
+  for (i in target_levels[-1]) {
+    df.numeric <- select_if(get(paste0("DV_",i)), is.numeric)
+    df.binary <- select_if(get(paste0("DV_",i)), is.factor)
+    df.multi <- select_if(get(paste0("DV_",i)), is.factor)
+    
+    for (j in colnames(df.binary)) {
+    if (length(unique(df.binary[[j]])) > 2) {
+      df.binary[[j]] <- NULL
+    }
+  }
+  
+    for (j in colnames(df.multi)) {
+      if (length(unique(df.multi[[j]])) == 2) {
+        df.multi[[j]] <- NULL
+      }
+    }
+    
+    # dummy code categorical variables & remove original variables
+    
+    if (length(df.binary) != 0) {
+      df.binary %<>% dummy_cols(remove_first_dummy = T) 
+    } 
+    
+    if (length(df.binary) == 2) {
+      df.binary[[1]] <- NULL
+    } else if (length(df.binary) > 2) {
+      df.binary = df.binary[, sapply(df.binary, class) != "factor"] # remove original columns
+    }
+    
+    if (length(df.multi) != 0) {
+      df.multi %<>% dummy_cols() # create dummy coded columns
+      df.multi = df.multi[, sapply(df.multi, class) != "factor"] # remove original columns and keep all dummies for these multiclass cases
+    }
+    
+    new_df <- cbind(df.numeric,df.binary)
+    new_df <- cbind(new_df,df.multi)
+    
+    # new_df[[target_reference_name]] <- NULL
+    # 
+    # if (binary_case == TRUE) {
+    #   new_df <- new_df |> dplyr::select(-target_names[1])
+    # }
+    
+    new_name <- paste0("DV_",i) # create name 
+    assign(new_name,new_df) # assign the new name
+   
+  }
+  
+}
+```
+
+```{r dummy coding full multiclass cases, echo = FALSE}
+if (multiclass_case == TRUE & multiclass_trt_case == TRUE) {
+  
+  for (i in df_list) {
+    df.numeric <- select_if(get(paste0(i)), is.numeric)
+    df.binary <- select_if(get(paste0(i)), is.factor)
+    df.multi <- select_if(get(paste0(i)), is.factor)
+    
+    for (j in colnames(df.binary)) {
+    if (length(unique(df.binary[[j]])) > 2) {
+      df.binary[[j]] <- NULL
+    }
+  }
+  
+    for (j in colnames(df.multi)) {
+      if (length(unique(df.multi[[j]])) == 2) {
+        df.multi[[j]] <- NULL
+      }
+    }
+    
+    # dummy code categorical variables & remove original variables
+    
+    if (length(df.binary) != 0) {
+      df.binary %<>% dummy_cols(remove_first_dummy = T) 
+    } 
+    
+    if (length(df.binary) == 2) {
+      df.binary[[1]] <- NULL
+    } else if (length(df.binary) > 2) {
+      df.binary = df.binary[, sapply(df.binary, class) != "factor"] # remove original columns
+    }
+    
+    if (length(df.multi) != 0) {
+      df.multi %<>% dummy_cols() # create dummy coded columns
+      df.multi = df.multi[, sapply(df.multi, class) != "factor"] # remove original columns and keep all dummies for these multiclass cases
+    }
+    
+    new_df <- cbind(df.numeric,df.binary)
+    new_df <- cbind(new_df,df.multi)
+    
+    # new_df[[treatment_reference_name]] <- NULL
+    # new_df[[target_reference_name]] <- NULL
+    # 
+    # if (binary_case == TRUE) {
+    #   new_df <- new_df |> dplyr::select(-target_names[1])
+    # }
+    
+    new_name <- paste0(i) # create name 
+    assign(new_name,new_df) # assign the new name
+    
+  }
+}
+```
+
+## Re-specify inputs
+
+```{r re-specify inputs, echo = FALSE}
+
+if (binary_case == TRUE & is.factor(df.original[[target_name]])) {
+  target_name = names(pp_df)[which(names(pp_df) %in% target_names)]
+}
+
+if (binary_trt_case == TRUE & is.factor(df.original[[treatment_name]])) {
+  treatment_name = names(pp_df)[which(names(pp_df) %in% treatment_names)]
+}
+
+
+if (multiclass_case == FALSE & multiclass_trt_case == FALSE) {
+  covariate_names = pp_df |> dplyr::select(-target_name,-treatment_name) |> names()
+  var_names = pp_df |> dplyr::select(-target_name) |> names()
+}
+
+if (multiclass_case == FALSE) {
+  target = pp_df[[target_name]]
+}
+
+if (multiclass_trt_case == FALSE) {
+  treatment = pp_df[[treatment_name]]
+}
+
+if (multiclass_case == FALSE & multiclass_trt_case == FALSE) {
+  covariates = pp_df |> dplyr::select(covariate_names)
+  vars = pp_df |> dplyr::select(var_names)
+}
+
+```
+
+## Create models when neither the target or treatment are multiclass
+
+```{r build model for non-multiclass cases, echo = FALSE}
+
+# run separate lassos for the target and the treatment
+lasso_target <- rlasso(
+  y = target,
+  x = covariates %>%  as.matrix(),
+)
+
+lasso_treatment <- rlassologit(
+  y = treatment,
+  x = covariates %>%  as.matrix(),
+)
+
+target_residuals <- lasso_target$residuals
+treatment_residuals <- lasso_treatment$residuals
+
+residuals_df <- data.frame(target_residuals,treatment_residuals)
+
+post.lasso <- lm(target_residuals ~ treatment_residuals, data = residuals_df)
+summary(post.lasso)
+
+
+
+
+stat.formula <- paste0(target_name, " ~ ", treatment_name)
+  
+stat.model <- lm(stat.formula, data = pp_df)
+summary(stat.model)
+
+```
+
+
+## Results
+
+### For non-multiclass cases
+
+```{r results for non-multiclass cases, echo = FALSE}
+
+lasso_var_names <- NULL # initialize unused object
+
+if (multiclass_case == FALSE & multiclass_trt_case == FALSE) {
+
+  lasso_summary <- summary(post.lasso)
+  
+  summary_table <- lasso_summary[["coefficients"]]
+  
+  treatment_estimate <- summary_table[[2]]
+  
+  treatment_p_value <- summary_table[[2,4]]
+  
+  odds_ratio <- exp(treatment_estimate)
+  
+  odds_change <- (odds_ratio - 1) * 100 # for logistic cases
+  
+  if (treatment_estimate >= 0) {
+    treatment_direction = "increase"
+  } else {
+    treatment_direction = "decrease"
+  }
+  
+  if (numeric_case == TRUE & binary_trt_case == TRUE) {
+    if (treatment_p_value <= 0.05) {
+      lasso_statement = paste0(treatment_name, " was statistically significant in predicting ", target_name, ". Compared to the reference level (", treatment_names[1], "), ", treatment_name, " resulted in a ", round(treatment_estimate, digits = digit_precision), " ", treatment_direction, " in ", target_name, ".") |> toJSON()
+    } else {
+      lasso_statement = paste0(treatment_name, " did not statistically significantly predict ", target_name, ".") |> toJSON()
+    }
+  }
+  
+  if (numeric_case == TRUE & numeric_trt_case == TRUE) {
+    if (treatment_p_value <= 0.05) {
+      lasso_statement = paste0(treatment_name, " was statistically significant in predicting ", target_name, ". A one-unit increase in ", treatment_name, " results in a ", round(treatment_estimate, digits = digit_precision), " ", treatment_direction, " in ", target_name, ".") |> toJSON()
+    } else {
+      lasso_statement = paste0(treatment_name, " did not statistically significantly predict ", target_name, ".") |> toJSON()
+    }
+  }
+  
+  if (binary_case == TRUE & numeric_trt_case == TRUE) {
+    if (treatment_p_value <= 0.05) {
+      lasso_statement = paste0(treatment_name, " was statistically significant in predicting ", target_name, ". A one-unit increase in ", treatment_name, " results in a ", round(odds_change, digits = digit_precision), "% change in the odds of ", target_name, ".") |> toJSON()
+    } else {
+      lasso_statement = paste0(treatment_name, " did not statistically significantly predict ", target_name, ".") |> toJSON()
+    }
+  }
+  
+  if (binary_case == TRUE & binary_trt_case == TRUE) {
+    if (treatment_p_value <= 0.05) {
+      lasso_statement = paste0(treatment_name, " was statistically significant in predicting ", target_name, ". Compared to the reference level (", treatment_names[1], "), ", treatment_name, " results in a ", round(odds_change, digits = digit_precision), "% change in the odds of ", target_name, ".") |> toJSON()
+    } else {
+      lasso_statement = paste0(treatment_name, " did not statistically significantly predict ", target_name, ".") |> toJSON()
+    }
+  }
+  
+  lasso_var_names <- knitr::combine_words(var_names) |> toJSON()
+  
+}
+```
+
+
+
