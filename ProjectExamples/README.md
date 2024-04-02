@@ -1,0 +1,1 @@
+* For an example of unsupervised learning using PAM clustering to create groups of customers based on purchasing habits and demographics, see [Clustering-For-Marketing.md](https://github.com/vnzbergstrom/ProjectExamples/blob/main/Clustering-for-Marketing.md)
