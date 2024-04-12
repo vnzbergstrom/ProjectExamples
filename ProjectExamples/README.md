@@ -1,2 +1,3 @@
 * For an example of unsupervised learning using PAM clustering to create groups of customers based on purchasing habits and demographics, see [Clustering-For-Marketing.md](https://github.com/vnzbergstrom/ProjectExamples/blob/main/Clustering-for-Marketing.md)
 * For an example of double machine learning to make causal inferences on observational data using a simulated data set, see [double-machine-learning.md](https://github.com/vnzbergstrom/ProjectExamples/blob/main/ProjectExamples/double-machine-learning.md)
+* For examples of my solutions to general coding problems in R, see [general-coding-solutions.md](https://github.com/vnzbergstrom/ProjectExamples/commit/5c895bce83a27803939915931b639cb4ea0c668a)
