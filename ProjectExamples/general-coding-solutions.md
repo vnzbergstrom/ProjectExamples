@@ -1,12 +1,13 @@
 General Coding Solutions
 ================
 Veronica Bergstrom
-Last updated: 12 April, 2024
+Last updated: 10 May, 2024
 
 - [Install Libraries](#install-libraries)
   - [Time conversion](#time-conversion)
   - [Lonely Integer](#lonely-integer)
-  - [Sum Diagonals of a Square](#sum-diagonals-of-a-square)
+  - [Take the Difference of the Diagonals of a
+    Square](#take-the-difference-of-the-diagonals-of-a-square)
   - [Counting Sort Function](#counting-sort-function)
 - [Print the sum of the minimum 4 values and print the sum of the
   maximum 4 values of an
@@ -81,9 +82,7 @@ lonelyinteger(a)
     ## [1] 4
     ## Levels: 1 2 3 4
 
-## Sum Diagonals of a Square
-
-Sum the two diagonals of a square matrix.
+## Take the Difference of the Diagonals of a Square
 
 ``` r
 # function
